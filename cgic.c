@@ -66,6 +66,7 @@ int cgiContentLength;
 char *cgiAccept;
 char *cgiUserAgent;
 char *cgiReferrer;
+int cgiAllowUploads;
 
 FILE *cgiIn;
 FILE *cgiOut;
@@ -78,7 +79,8 @@ static void cgiGetenv(char **s, char *var);
 typedef enum {
 	cgiParseSuccess,
 	cgiParseMemory,
-	cgiParseIO
+	cgiParseIO,
+	cgiParseUploadsNotAllowed
 } cgiParseResultType;
 
 /* One form entry, consisting of an attribute-value pair,
@@ -192,6 +194,13 @@ int main(int argc, char *argv[]) {
 	cgiGetenv(&cgiUserAgent, "HTTP_USER_AGENT");
 	cgiGetenv(&cgiReferrer, "HTTP_REFERER");
 	cgiGetenv(&cgiCookie, "HTTP_COOKIE");
+	// Environment CGIC_ALLOW_UPLOADS, if 0 or not set uploads are not allowed, if any other value uploads are allowed
+	e = getenv("CGIC_ALLOW_UPLOADS");
+	if (e) {
+		cgiAllowUploads = atoi(e);
+	} else {
+		cgiAllowUploads = 1;
+	}
 #ifdef CGICDEBUG
 	CGICDEBUGSTART
 	fprintf(dout, "%d\n", cgiContentLength);
@@ -254,13 +263,17 @@ int main(int argc, char *argv[]) {
 			fprintf(dout, "Calling PostMultipartInput\n");
 			CGICDEBUGEND	
 #endif /* CGICDEBUG */
-			if (cgiParsePostMultipartInput() != cgiParseSuccess) {
+			cgiParseResultType _result = cgiParsePostMultipartInput();
+			if (_result != cgiParseSuccess) {
 #ifdef CGICDEBUG
 				CGICDEBUGSTART
 				fprintf(dout, "PostMultipartInput failed\n");
 				CGICDEBUGEND	
 #endif /* CGICDEBUG */
-				cgiHeaderStatus(500, "Error reading form data");
+				if(_result == cgiParseUploadsNotAllowed)
+					cgiHeaderStatus(403, "Uploads are not allowed.");
+				else
+					cgiHeaderStatus(500, "Error reading form data");
 				cgiFreeResources();
 				return -1;
 			}	
@@ -548,14 +561,16 @@ static cgiParseResultType cgiParsePostMultipartInput() {
 		/* OK, we have a new pair, add it to the list. */
 		n = (cgiFormEntry *) malloc(sizeof(cgiFormEntry));	
 		if (!n) {
-			goto outOfMemory;
+			result = cgiParseMemory;
+			goto error;
 		}
 		memset(n, 0, sizeof(cgiFormEntry));
 		/* 2.01: one of numerous new casts required
 			to please C++ compilers */
 		n->attr = (char *) malloc(strlen(fname) + 1);
 		if (!n->attr) {
-			goto outOfMemory;
+			result = cgiParseMemory;
+			goto error;
 		}
 		strcpy(n->attr, fname);
 		if (out) {
@@ -564,7 +579,8 @@ static cgiParseResultType cgiParsePostMultipartInput() {
 		} else if (outf) {
 			n->value = (char *) malloc(1);
 			if (!n->value) {
-				goto outOfMemory;
+				result = cgiParseMemory;
+				goto error;
 			}
 			n->value[0] = '\0';
 		}
@@ -577,15 +593,22 @@ static cgiParseResultType cgiParsePostMultipartInput() {
 		}
 		n->fileName = (char *) malloc(strlen(ffileName) + 1);
 		if (!n->fileName) {
-			goto outOfMemory;
+			result = cgiParseMemory;
+			goto error;
 		}
 		strcpy(n->fileName, ffileName);
 		n->contentType = (char *) malloc(strlen(fcontentType) + 1);
 		if (!n->contentType) {
-			goto outOfMemory;
+			result = cgiParseMemory;
+			goto error;
 		}
 		strcpy(n->contentType, fcontentType);
 	
+		if(!cgiAllowUploads && strlen(n->fileName) > 0)	{
+			result = cgiAllowUploads;
+			goto error;			
+		}
+
 		if(outf)
 		{
 			n->tFile = fdopen (dup (fileno (outf)), "w+b");
@@ -595,7 +618,7 @@ static cgiParseResultType cgiParsePostMultipartInput() {
 		l = n;			
 	}	
 	return cgiParseSuccess;
-outOfMemory:
+error:
 	if (n) {
 		if (n->attr) {
 			free(n->attr);
@@ -621,7 +644,7 @@ outOfMemory:
 		fclose(outf);
 	}
 
-return cgiParseMemory;
+return result;
 }
 
 static cgiParseResultType getTempFileName(FILE **tFile)
@@ -1961,6 +1984,9 @@ cgiEnvironmentResultType cgiWriteEnvironment(char *filename) {
 	if (!cgiWriteInt(out, cgiContentLength)) {
 		goto error;
 	}
+	if (!cgiWriteInt(out, cgiAllowUploads)) {
+		goto error;
+	}
 	e = cgiFormEntryFirst;
 	while (e) {
 		cgiFilePtr fp;
@@ -2122,6 +2148,9 @@ cgiEnvironmentResultType cgiReadEnvironment(char *filename) {
 		goto error;
 	}
 	if (!cgiReadInt(in, &cgiContentLength)) {
+		goto error;
+	}
+	if (!cgiReadInt(in, &cgiAllowUploads)) {
 		goto error;
 	}
 	p = 0;
