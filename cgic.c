@@ -36,8 +36,11 @@
 /* cgic 2.01 */
 #include <fcntl.h>
 
+#include <windows.h>
+
 #else
 #include <unistd.h>
+#include <sys/statvfs.h>
 #endif /* WIN32 */
 #include "cgic.h"
 
@@ -68,6 +71,7 @@ char *cgiUserAgent;
 char *cgiReferrer;
 int cgiAllowUploads;
 long long cgiMaxFileSize;
+double cgiFreeDiskPercent;
 
 FILE *cgiIn;
 FILE *cgiOut;
@@ -209,6 +213,13 @@ int main(int argc, char *argv[]) {
 		cgiMaxFileSize = atoll(e);
 	} else {
 		cgiMaxFileSize = 0;
+	}
+	// Environment CGIC_FREE_DISK_PERCENT, if 0 it will write without limits, if not it will stop writing when free space percentage is less than value
+	e = getenv("CGIC_FREE_DISK_PERCENT");
+	if (e) {
+		cgiFreeDiskPercent = atof(e);
+	} else {
+		cgiFreeDiskPercent = 0;
 	}
 #ifdef CGICDEBUG
 	CGICDEBUGSTART
@@ -1924,6 +1935,10 @@ static int cgiWriteInt(FILE *out, int i);
 
 static int cgiWriteLongLong(FILE *out, long long i);
 
+static int cgiWriteDouble(FILE *out, double i);
+
+static double cgiGetSpacePercentage(const char* path);
+
 #define CGIC_VERSION "2.0"
 
 cgiEnvironmentResultType cgiWriteEnvironment(char *filename) {
@@ -2007,6 +2022,9 @@ cgiEnvironmentResultType cgiWriteEnvironment(char *filename) {
 	if (!cgiWriteLongLong(out, cgiMaxFileSize)) {
 		goto error;
 	}
+	if (!cgiWriteDouble(out, cgiFreeDiskPercent)) {
+		goto error;
+	}
 	e = cgiFormEntryFirst;
 	while (e) {
 		cgiFilePtr fp;
@@ -2036,6 +2054,12 @@ cgiEnvironmentResultType cgiWriteEnvironment(char *filename) {
 			while (cgiFormFileRead(fp, buffer, 
 				sizeof(buffer), &got) == cgiFormSuccess)
 			{
+				if(cgiFreeDiskPercent > 0)
+				{
+					if(cgiGetSpacePercentage(cgicTempDir) < cgiFreeDiskPercent)
+					cgiFormFileClose(fp);
+					goto error;
+				}
 				if (((int) fwrite(buffer, 1, got, out)) != got) {
 					cgiFormFileClose(fp);
 					goto error;
@@ -2085,11 +2109,20 @@ static int cgiWriteLongLong(FILE *out, long long i) {
 	return 1;
 }
 
+static int cgiWriteDouble(FILE *out, double i) {
+	if (!fwrite(&i, sizeof(double), 1, out)) {
+		return 0;
+	}
+	return 1;
+}
+
 static int cgiReadString(FILE *out, char **s);
 
 static int cgiReadInt(FILE *out, int *i);
 
 static int cgiReadLongLong(FILE *out, long long *i);
+
+static int cgiReadDouble(FILE *out, double *i);
 
 cgiEnvironmentResultType cgiReadEnvironment(char *filename) {
 	FILE *in;
@@ -2185,6 +2218,9 @@ cgiEnvironmentResultType cgiReadEnvironment(char *filename) {
 	if (!cgiReadLongLong(in, &cgiMaxFileSize)) {
 		goto error;
 	}
+	if (!cgiReadDouble(in, &cgiFreeDiskPercent)) {
+		goto error;
+	}
 	p = 0;
 	while (1) {
 		int fileFlag;
@@ -2237,6 +2273,13 @@ cgiEnvironmentResultType cgiReadEnvironment(char *filename) {
 				}
 				got = fread(buffer, 1, tryr, in);
 				if (got <= 0) {
+					result = cgiEnvironmentIO;
+					fclose(out);
+					goto error;
+				}
+				if(cgiFreeDiskPercent > 0)
+				{
+					if(cgiGetSpacePercentage(cgicTempDir) < cgiFreeDiskPercent)
 					result = cgiEnvironmentIO;
 					fclose(out);
 					goto error;
@@ -2316,6 +2359,13 @@ static int cgiReadInt(FILE *out, int *i) {
 
 static int cgiReadLongLong(FILE *out, long long *i) {
 	if (!fread(i, sizeof(long long), 1, out)) {
+		return 0;
+	}
+	return 1;
+}
+
+static int cgiReadDouble(FILE *out, double *i) {
+	if (!fread(i, sizeof(double), 1, out)) {
 		return 0;
 	}
 	return 1;
@@ -2585,6 +2635,93 @@ cgiFormResultType cgiValueEscape(const char *s)
 	return cgiValueEscapeData(s, (int) strlen(s));
 }
 
+#ifdef WIN32
+typedef BOOL (WINAPI *P_GDFSE)(LPCTSTR, PULARGE_INTEGER, 
+	PULARGE_INTEGER, PULARGE_INTEGER);
+#endif
+
+static double cgiGetSpacePercentage(const char* path)
+{
+#ifdef WIN32
+	BOOL  fResult;
+
+	char  *pszDrive  = NULL;
+	// CGIC just uses tmpnam on win32 and it will use this path so ignore parameter and use environment.
+	char *tmpPath = getenv("TEMP");
+
+	if(!tmpPath)
+		return 0;
+
+	pszDrive = malloc(sizeof(path));
+	memset(pszDrive, 0, sizeof(path));
+	fResult = GetVolumePathName(path, pszDrive, sizeof(path));
+
+	if(!fResult)
+		return 0;
+
+	DWORD dwSectPerClust,
+	dwBytesPerSect,
+	dwFreeClusters,
+	dwTotalClusters;
+
+	P_GDFSE pGetDiskFreeSpaceEx = NULL;
+
+	unsigned __int64 i64FreeBytesToCaller,
+		i64TotalBytes,
+		i64FreeBytes;
+
+	/*
+	Use GetDiskFreeSpaceEx if available; otherwise, use
+	GetDiskFreeSpace.
+
+	Note: Since GetDiskFreeSpaceEx is not in Windows 95 Retail, we
+	dynamically link to it and only call it if it is present.  We 
+	don't need to call LoadLibrary on KERNEL32.DLL because it is 
+	already loaded into every Win32 process's address space.
+	*/ 
+	pGetDiskFreeSpaceEx = (P_GDFSE)GetProcAddress (
+				GetModuleHandle ("kernel32.dll"),
+								"GetDiskFreeSpaceExA");
+	if (pGetDiskFreeSpaceEx) {
+		fResult = pGetDiskFreeSpaceEx (pszDrive,
+					(PULARGE_INTEGER)&i64FreeBytesToCaller,
+					(PULARGE_INTEGER)&i64TotalBytes,
+					(PULARGE_INTEGER)&i64FreeBytes);
+		
+		if (fResult)
+			return ((double)i64FreeBytesToCaller / (double)i64TotalBytes) * 100.0;
+		else
+			return 0;
+	}
+	else {
+		fResult = GetDiskFreeSpace (pszDrive, 
+									&dwSectPerClust,
+									&dwBytesPerSect, 
+									&dwFreeClusters,
+									&dwTotalClusters);
+		if (fResult) {
+			/* force 64-bit math */ 
+			i64TotalBytes = (__int64)dwTotalClusters * dwSectPerClust *
+							dwBytesPerSect;
+			i64FreeBytes = (__int64)dwFreeClusters * dwSectPerClust *
+							dwBytesPerSect;
+			
+			return ((double)i64FreeBytes / (double)i64TotalBytes) * 100.0;
+		}
+		else
+			return 0;
+	}
+#else
+	struct statvfs stfs;
+
+	statvfs(path, &stfs);
+
+	double total = (double)(stfs.f_blocks * stfs.f_frsize);
+	double free = (double)(stfs.f_bsize * stfs.f_bavail);
+
+	return (free / total) * 100.0;
+#endif	
+}
 
 #ifdef UNIT_TEST
 
