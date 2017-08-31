@@ -67,6 +67,7 @@ char *cgiAccept;
 char *cgiUserAgent;
 char *cgiReferrer;
 int cgiAllowUploads;
+long long cgiMaxFileSize;
 
 FILE *cgiIn;
 FILE *cgiOut;
@@ -80,7 +81,8 @@ typedef enum {
 	cgiParseSuccess,
 	cgiParseMemory,
 	cgiParseIO,
-	cgiParseUploadsNotAllowed
+	cgiParseUploadsNotAllowed,
+	cgiParseFileSizeTooBig
 } cgiParseResultType;
 
 /* One form entry, consisting of an attribute-value pair,
@@ -201,6 +203,13 @@ int main(int argc, char *argv[]) {
 	} else {
 		cgiAllowUploads = 1;
 	}
+	// Environment CGIC_MAX_FILESIZE, if 0 unlimited
+	e = getenv("CGIC_MAX_FILESIZE");
+	if (e) {
+		cgiMaxFileSize = atoll(e);
+	} else {
+		cgiMaxFileSize = 0;
+	}
 #ifdef CGICDEBUG
 	CGICDEBUGSTART
 	fprintf(dout, "%d\n", cgiContentLength);
@@ -272,6 +281,8 @@ int main(int argc, char *argv[]) {
 #endif /* CGICDEBUG */
 				if(_result == cgiParseUploadsNotAllowed)
 					cgiHeaderStatus(403, "Uploads are not allowed.");
+				else if(_result == cgiParseFileSizeTooBig)
+					cgiHeaderStatus(413, "Payload is too big.");
 				else
 					cgiHeaderStatus(500, "Error reading form data");
 				cgiFreeResources();
@@ -583,6 +594,10 @@ static cgiParseResultType cgiParsePostMultipartInput() {
 				goto error;
 			}
 			n->value[0] = '\0';
+		}
+		if(cgiMaxFileSize > 0 && bodyLength > cgiMaxFileSize) {
+			result = cgiMaxFileSize;
+			goto error;
 		}
 		n->valueLength = bodyLength;
 		n->next = 0;
@@ -1907,6 +1922,8 @@ static int cgiWriteString(FILE *out, char *s);
 
 static int cgiWriteInt(FILE *out, int i);
 
+static int cgiWriteLongLong(FILE *out, long long i);
+
 #define CGIC_VERSION "2.0"
 
 cgiEnvironmentResultType cgiWriteEnvironment(char *filename) {
@@ -1987,6 +2004,9 @@ cgiEnvironmentResultType cgiWriteEnvironment(char *filename) {
 	if (!cgiWriteInt(out, cgiAllowUploads)) {
 		goto error;
 	}
+	if (!cgiWriteLongLong(out, cgiMaxFileSize)) {
+		goto error;
+	}
 	e = cgiFormEntryFirst;
 	while (e) {
 		cgiFilePtr fp;
@@ -2058,9 +2078,18 @@ static int cgiWriteInt(FILE *out, int i) {
 	return 1;
 }
 
+static int cgiWriteLongLong(FILE *out, long long i) {
+	if (!fwrite(&i, sizeof(long long), 1, out)) {
+		return 0;
+	}
+	return 1;
+}
+
 static int cgiReadString(FILE *out, char **s);
 
 static int cgiReadInt(FILE *out, int *i);
+
+static int cgiReadLongLong(FILE *out, long long *i);
 
 cgiEnvironmentResultType cgiReadEnvironment(char *filename) {
 	FILE *in;
@@ -2151,6 +2180,9 @@ cgiEnvironmentResultType cgiReadEnvironment(char *filename) {
 		goto error;
 	}
 	if (!cgiReadInt(in, &cgiAllowUploads)) {
+		goto error;
+	}
+	if (!cgiReadLongLong(in, &cgiMaxFileSize)) {
 		goto error;
 	}
 	p = 0;
@@ -2277,6 +2309,13 @@ static int cgiReadString(FILE *in, char **s) {
 
 static int cgiReadInt(FILE *out, int *i) {
 	if (!fread(i, sizeof(int), 1, out)) {
+		return 0;
+	}
+	return 1;
+}
+
+static int cgiReadLongLong(FILE *out, long long *i) {
+	if (!fread(i, sizeof(long long), 1, out)) {
 		return 0;
 	}
 	return 1;
