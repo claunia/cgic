@@ -1939,7 +1939,7 @@ static int cgiWriteDouble(FILE *out, double i);
 
 static double cgiGetSpacePercentage(const char* path);
 
-#define CGIC_VERSION "2.0"
+#define CGIC_VERSION "2.1"
 
 cgiEnvironmentResultType cgiWriteEnvironment(char *filename) {
 	FILE *out;
@@ -1950,7 +1950,7 @@ cgiEnvironmentResultType cgiWriteEnvironment(char *filename) {
 		/* Can't create file */
 		return cgiEnvironmentIO;
 	}
-	if (!cgiWriteString(out, "CGIC2.0")) {
+	if (!cgiWriteString(out, "CGIC2.1")) {
 		goto error;
 	}
 	if (!cgiWriteString(out, cgiServerSoftware)) {
