@@ -3,3 +3,7 @@
 *.cgi
 capture
 cgicunittest
+GPATH
+GRTAGS
+GTAGS
+.vscode
